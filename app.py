@@ -111,7 +111,7 @@ def index():
         mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else max(bid, ask)
 
         # Premium (1 contract = 100 shares)
-        premium = mid * 100
+        premium = round(mid * 100, 2)
 
         # Covered call metrics
         breakeven = price - mid
