@@ -153,12 +153,27 @@
 
 {% if result %}
 <div class="card result">
-    <h3>Suggested Strike</h3>
+    <h3>Covered Call Summary</h3>
     <p><strong>Ticker:</strong> {{ result.ticker }}</p>
+    <p><strong>Stock Price:</strong> ${{ result.price }}</p>
+    <p><strong>Expiration:</strong> {{ result.expiration }} ({{ result.days }} days)</p>
     <p><strong>Risk:</strong> {{ result.risk }}</p>
-    <p><strong>Target Delta:</strong> {{ result.target_delta }}</p>
-    <p><strong>Strike:</strong> ${{ result.strike }}</p>
+
+    <hr>
+
+    <p><strong>Theoretical Strike:</strong> ${{ result.theoretical }}</p>
+    <p><strong>Actual Strike:</strong> ${{ result.strike }}</p>
     <p><strong>IV Used:</strong> {{ result.iv }}</p>
+    <p><strong>Assignment Probability (Delta):</strong> {{ result.assignment_prob }}</p>
+
+    <hr>
+
+    <p><strong>Mid Price (per share):</strong> ${{ result.mid_price }}</p>
+    <p><strong>Premium (1 contract):</strong> ${{ result.premium }}</p>
+    <p><strong>Yield:</strong> {{ result.yield }}%</p>
+    <p><strong>Annualized Yield:</strong> {{ result.annualized }}%</p>
+    <p><strong>Breakeven:</strong> ${{ result.breakeven }}</p>
+    <p><strong>Max Profit:</strong> ${{ result.max_profit }}</p>
 </div>
 {% endif %}
 
