@@ -7,7 +7,7 @@ app = Flask(__name__)
 # --- S&P 500 list for autocomplete (shortened for example) ---
 SP500_TICKERS = [
     "AAPL", "MSFT", "AMZN", "GOOGL", "META", "MCD", "JPM", "XOM", "NVDA"
-    # ... include your full list here ...
+    # ... your full list ...
 ]
 
 # --- Pretty labels for delta ranges ---
@@ -29,40 +29,54 @@ DELTA_TARGETS = {
 }
 
 
-# --- Validate ticker using fast_info ---
 def is_valid_ticker(symbol: str) -> bool:
+    """Validate ticker by checking if it has at least 1 day of price history."""
+    symbol = symbol.upper().strip()
+    if not symbol:
+        return False
     try:
-        t = yf.Ticker(symbol)
-        info = t.fast_info
-        return info is not None and "last_price" in info and info["last_price"] is not None
+        df = yf.download(symbol, period="1d", progress=False)
+        return not df.empty
     except Exception:
         return False
 
 
-# --- Pull expiration dates for ticker ---
+def get_spot_price(symbol: str) -> float:
+    """Get last close as spot price."""
+    df = yf.download(symbol, period="1d", progress=False)
+    return float(df["Close"].iloc[-1])
+
+
 def get_expiration_dates(ticker: str):
+    """Return list of expiration dates for a ticker, or [] if none/failed."""
     try:
         t = yf.Ticker(ticker)
-        return list(t.options or [])
+        exps = t.options
+        return list(exps or [])
     except Exception:
         return []
 
 
-# --- Select call option closest to target delta ---
 def select_call_for_delta(ticker: str, expiration: str, target_delta: float):
+    """
+    Select a call option for the given ticker/expiration targeting a delta.
+    If delta is unavailable, fall back to closest strike to spot.
+    """
     t = yf.Ticker(ticker)
-    info = t.fast_info
-    spot = info["last_price"]
+    spot = get_spot_price(ticker)
 
     chain = t.option_chain(expiration)
     calls = chain.calls.copy()
+
+    if calls.empty:
+        raise ValueError("No call options returned for this expiration.")
 
     # If delta exists, use it
     if "delta" in calls.columns:
         calls["delta_diff"] = (calls["delta"].abs() - target_delta).abs()
         best = calls.sort_values("delta_diff").iloc[0]
     else:
-        # Fallback: closest strike above spot
+        # Fallback: closest strike to spot
         calls["strike_diff"] = (calls["strike"] - spot).abs()
         best = calls.sort_values("strike_diff").iloc[0]
 
@@ -79,7 +93,6 @@ def select_call_for_delta(ticker: str, expiration: str, target_delta: float):
     }
 
 
-# --- Days to expiration ---
 def compute_days_to_expiration(expiration: str) -> int:
     try:
         exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
@@ -97,22 +110,28 @@ def index():
     ticker = "MCD"
     risk = "moderate"
     expiration = None
+    expirations = []
 
     if request.method == "POST":
         ticker = request.form.get("ticker", ticker).upper().strip()
         risk = request.form.get("risk", risk)
-        expiration = request.form.get("expiration")
+        expiration = request.form.get("expiration") or None
 
-    # Validate ticker
+    # Validate ticker first
     if not is_valid_ticker(ticker):
         error = f"'{ticker}' is not a valid ticker symbol."
-        expirations = []
     else:
+        # Get expirations for this ticker
         expirations = get_expiration_dates(ticker)
-        if not expiration and expirations:
-            expiration = expirations[0]
 
-    # Compute option selection
+        if not expirations:
+            error = f"No option expirations available for {ticker}."
+        else:
+            # If no expiration chosen or invalid, default to first
+            if expiration not in expirations:
+                expiration = expirations[0]
+
+    # Compute option selection if everything is valid
     if not error and expiration and risk in DELTA_TARGETS:
         target_delta = DELTA_TARGETS[risk]
         risk_label = DELTA_LABELS[risk]
