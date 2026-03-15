@@ -1,8 +1,5 @@
 import os
 import math
-from functools import lru_cache
-from datetime import datetime, timedelta
-
 from flask import Flask, render_template, request, jsonify
 import yfinance as yf
 
@@ -32,11 +29,6 @@ def find_strike(S, T, r, sigma, target_delta):
         K += 0.5
     return round(best_K, 2)
 
-def get_real_strikes(ticker_obj, expiration):
-    chain = ticker_obj.option_chain(expiration)
-    calls = chain.calls
-    return sorted(list(calls["strike"]))
-
 def round_to_real_strike(theoretical, strike_list, direction="up"):
     if not strike_list:
         return round(theoretical, 2)
@@ -55,55 +47,28 @@ def round_to_real_strike(theoretical, strike_list, direction="up"):
 
     return float(min(strike_list, key=lambda x: abs(x - theoretical)))
 
-# ---------- Simple in-memory cache for price/IV ----------
-
-_price_cache = {}
-_iv_cache = {}
-CACHE_TTL = timedelta(seconds=60)
-
-def _is_fresh(ts):
-    return datetime.utcnow() - ts < CACHE_TTL
+# ---------- Live data helpers ----------
 
 def get_live_price(symbol):
-    symbol = symbol.upper()
-    now = datetime.utcnow()
-
-    if symbol in _price_cache:
-        value, ts = _price_cache[symbol]
-        if _is_fresh(ts):
-            return value
-
     t = yf.Ticker(symbol)
     data = t.history(period="1d")
-    price = float(data["Close"].iloc[-1])
-    _price_cache[symbol] = (price, now)
-    return price
+    return float(data["Close"].iloc[-1])
 
-def get_live_iv(symbol, spot):
-    symbol = symbol.upper()
-    now = datetime.utcnow()
-
-    if symbol in _iv_cache:
-        value, ts = _iv_cache[symbol]
-        if _is_fresh(ts):
-            return value
-
-    t = yf.Ticker(symbol)
-    expirations = t.options
+def get_atm_iv(ticker_obj, spot):
+    expirations = ticker_obj.options
     if not expirations:
-        return None
+        return None, None
 
     nearest_exp = expirations[0]
-    chain = t.option_chain(nearest_exp)
+    chain = ticker_obj.option_chain(nearest_exp)
     calls = chain.calls
+
     calls["diff"] = (calls["strike"] - spot).abs()
     atm = calls.sort_values("diff").iloc[0]
     iv = float(atm["impliedVolatility"])
+    return iv, nearest_exp
 
-    _iv_cache[symbol] = (iv, now)
-    return iv
-
-# ---------- API endpoints ----------
+# ---------- API endpoints for frontend autofill ----------
 
 @app.route("/price")
 def price():
@@ -115,12 +80,13 @@ def price():
 def iv():
     symbol = request.args.get("ticker", "MCD").upper()
     spot = get_live_price(symbol)
-    iv_val = get_live_iv(symbol, spot)
+    t = yf.Ticker(symbol)
+    iv_val, _ = get_atm_iv(t, spot)
     if iv_val is None:
         return jsonify({"iv": None})
     return jsonify({"iv": round(iv_val, 4)})
 
-# ---------- Main page ----------
+# ---------- Main covered call calculator ----------
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -131,31 +97,71 @@ def index():
         days = int(request.form["days"])
         risk = request.form["risk"]
 
+        # Live price
         price = get_live_price(ticker)
-        iv = get_live_iv(ticker, price)
+
+        # Live IV + nearest expiration
+        t = yf.Ticker(ticker)
+        iv, nearest_exp = get_atm_iv(t, price)
+        if iv is None or nearest_exp is None:
+            return render_template("index.html", result=None, error="No options data available for this ticker.")
 
         T = days / 365
         r = 0.02
+
+        # Target delta by risk
         target = {"low": 0.10, "moderate": 0.20, "high": 0.30}[risk]
 
+        # Theoretical strike from delta
         theoretical_strike = find_strike(price, T, r, iv, target)
 
-        t = yf.Ticker(ticker)
-        expirations = t.options
-        nearest_exp = expirations[0] if expirations else None
-        real_strike = theoretical_strike
+        # Real strikes from chain
+        chain = t.option_chain(nearest_exp)
+        calls = chain.calls
+        strike_list = sorted(list(calls["strike"]))
+        real_strike = round_to_real_strike(theoretical_strike, strike_list, direction="up")
 
-        if nearest_exp:
-            real_strikes = get_real_strikes(t, nearest_exp)
-            real_strike = round_to_real_strike(theoretical_strike, real_strikes, direction="up")
+        # Find row for chosen strike
+        row = calls[calls["strike"] == real_strike]
+        if row.empty:
+            # fallback: nearest by absolute difference
+            idx = (calls["strike"] - real_strike).abs().idxmin()
+            row = calls.loc[[idx]]
+
+        row = row.iloc[0]
+
+        bid = float(row["bid"])
+        ask = float(row["ask"])
+        mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else max(bid, ask)
+
+        # 1 contract = 100 shares
+        premium = mid * 100
+
+        breakeven = price - mid
+        yield_pct = premium / (price * 100) if price > 0 else 0
+        annualized = yield_pct * (365 / days) if days > 0 else 0
+
+        # Assignment probability via delta of final strike
+        delta = call_delta(price, real_strike, T, r, iv)
+
+        max_profit = premium + max(0, (real_strike - price) * 100)
 
         result = {
             "ticker": ticker,
-            "target_delta": target,
-            "strike": real_strike,
+            "strike": round(real_strike, 2),
             "theoretical": round(theoretical_strike, 2),
+            "premium": round(premium, 2),
+            "mid_price": round(mid, 2),
+            "yield": round(yield_pct * 100, 2),        # %
+            "annualized": round(annualized * 100, 2),  # %
+            "breakeven": round(breakeven, 2),
+            "max_profit": round(max_profit, 2),
+            "assignment_prob": round(delta, 3),
+            "iv": round(iv, 3),
             "risk": risk.capitalize(),
-            "iv": round(iv, 3) if iv is not None else None
+            "days": days,
+            "price": round(price, 2),
+            "expiration": nearest_exp
         }
 
     return render_template("index.html", result=result)
