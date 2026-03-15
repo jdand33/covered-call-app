@@ -97,7 +97,13 @@ def index():
         iv = float(atm["impliedVolatility"])
 
         # Risk → target delta
-        target = {"low": 0.10, "moderate": 0.20, "high": 0.30}[risk]
+        target = {
+            "low": 0.10,
+            "low_moderate": 0.15,
+            "moderate": 0.20,
+            "moderate_high": 0.25,
+            "high": 0.30
+        }[risk]
 
         # Theoretical strike
         theoretical_strike = find_strike(price, T, r, iv, target)
