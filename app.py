@@ -1,157 +1,110 @@
-import math
-import numpy as np
-import yfinance as yf
 from flask import Flask, render_template, request
+import yfinance as yf
+import numpy as np
 
 app = Flask(__name__)
 
-# Your 5 risk tiers
-RISK_TIERS = {
-    "low": 0.10,
-    "low_moderate": 0.15,
-    "moderate": 0.20,
-    "moderate_high": 0.25,
-    "high": 0.30,
-}
-
-RISK_LABELS = {
-    "low": "Low",
-    "low_moderate": "Low-Moderate",
-    "moderate": "Moderate",
-    "moderate_high": "Moderate-High",
-    "high": "High",
-}
+# -----------------------------
+#  FULL S&P 500 TICKER LIST
+# -----------------------------
+SP500_TICKERS = [
+    "AAPL","MSFT","AMZN","NVDA","GOOGL","GOOG","META","BRK.B","LLY","TSLA","UNH","JPM","V","XOM",
+    "AVGO","PG","MA","HD","CVX","COST","ABBV","MRK","PEP","KO","WMT","BAC","ADBE","CRM","TMO",
+    "CSCO","MCD","ACN","ABT","LIN","DHR","NFLX","WFC","INTC","TXN","NEE","PM","MS","HON","UNP",
+    "AMGN","IBM","LOW","ORCL","SBUX","AMD","CAT","GS","GE","NOW","AMT","MDT","LMT","BLK","ISRG",
+    "CVS","SYK","PLD","BKNG","GILD","MDLZ","ADI","CI","ZTS","ADP","DE","MMC","MO","REGN","SPGI",
+    "ELV","TGT","BDX","SO","CB","CME","DUK","AON","PNC","ICE","NSC","CSX","EQIX","USB","SHW",
+    "APD","FDX","ITW","EW","GM","ETN","AEP","PSA","HCA","MCO","ROP","AIG","COF","FIS","FISV",
+    "MAR","KMB","D","ECL","EXC","AFL","ALL","A","MNST","LRCX","KLAC","NXPI","CDNS","SNPS","FTNT",
+    "PAYX","ORLY","ROST","CTAS","AZO","PH","MSI","IDXX","WELL","HUM","TRV","PRU","MET","AEE",
+    "ED","EIX","PEG","WEC","XEL"
+]
 
 # -----------------------------
-#   MARKET DATA FUNCTIONS
+#  VALIDATE TICKER
 # -----------------------------
+def validate_ticker(ticker: str) -> bool:
+    try:
+        t = yf.Ticker(ticker)
+        info = t.fast_info
 
-def get_current_price(ticker: str) -> float:
-    t = yf.Ticker(ticker)
-    data = t.history(period="1d")
-    if data.empty:
-        raise ValueError("No price data found for ticker.")
-    return float(data["Close"].iloc[-1])
+        # Must have valid price
+        if not info or info.last_price is None:
+            return False
 
+        # Must have option chain
+        if not t.options:
+            return False
 
-def get_market_aware_call(ticker: str, expiration: str, target_delta: float):
-    t = yf.Ticker(ticker)
-    chain = t.option_chain(expiration)
-    calls = chain.calls.copy()
-
-    if calls.empty or "delta" not in calls.columns:
-        raise ValueError("No delta data available for this expiration.")
-
-    # Find the strike whose delta is closest to the target
-    calls["delta_diff"] = np.abs(calls["delta"] - target_delta)
-    best_row = calls.loc[calls["delta_diff"].idxmin()]
-
-    return {
-        "strike": float(best_row["strike"]),
-        "bid": float(best_row["bid"]),
-        "ask": float(best_row["ask"]),
-        "mid": float((best_row["bid"] + best_row["ask"]) / 2),
-        "delta": float(best_row["delta"]),
-    }
-
+        return True
+    except Exception:
+        return False
 
 # -----------------------------
-#   COVERED CALL MATH
+#  GET CLOSEST DELTA STRIKE
 # -----------------------------
+def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
+    try:
+        t = yf.Ticker(ticker)
+        chain = t.option_chain(expiration)
+        calls = chain.calls
 
-def compute_covered_call_metrics(shares, cost_basis, strike, premium):
-    total_cost_basis = shares * cost_basis
-    total_premium = premium * (shares / 100)  # 1 contract per 100 shares
+        # Remove rows without delta
+        calls = calls.dropna(subset=["delta"])
 
-    breakeven = cost_basis - (premium / 100 * 100)
-    max_profit_per_share = (strike - cost_basis) + (premium / 100 * 100)
-    max_profit = max_profit_per_share * shares
+        # Find strike with delta closest to target
+        calls["abs_diff"] = (calls["delta"] - target_delta).abs()
+        best = calls.loc[calls["abs_diff"].idxmin()]
 
-    max_profit_pct = (max_profit / total_cost_basis) * 100 if total_cost_basis > 0 else 0
+        return {
+            "strike": float(best["strike"]),
+            "delta": float(best["delta"]),
+            "bid": float(best["bid"]),
+            "ask": float(best["ask"]),
+            "last": float(best["lastPrice"]),
+            "symbol": best["contractSymbol"]
+        }
 
-    return {
-        "total_cost_basis": total_cost_basis,
-        "total_premium": total_premium,
-        "breakeven": breakeven,
-        "max_profit": max_profit,
-        "max_profit_pct": max_profit_pct,
-    }
-
+    except Exception as e:
+        print("Error pulling delta:", e)
+        return None
 
 # -----------------------------
-#   FLASK ROUTE
+#  FLASK ROUTE
 # -----------------------------
-
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # Default values
-    ticker = "MCD"
-    shares = 100
-    cost_basis = 280.00
-    expiration = "2025-01-17"
-
     result = None
     error = None
 
     if request.method == "POST":
-        try:
-            ticker = request.form.get("ticker", ticker).upper().strip()
-            shares = int(request.form.get("shares", shares))
-            cost_basis = float(request.form.get("cost_basis", cost_basis))
-            expiration = request.form.get("expiration", expiration).strip()
-            risk_key = request.form.get("risk", "moderate")
+        ticker = request.form.get("ticker", "").upper().strip()
+        expiration = request.form.get("expiration")
+        target_delta = float(request.form.get("risk"))
 
-            if risk_key not in RISK_TIERS:
-                raise ValueError("Invalid risk tier selected.")
+        # Validate ticker
+        if ticker not in SP500_TICKERS or not validate_ticker(ticker):
+            return render_template(
+                "index.html",
+                error=f"'{ticker}' is not a valid S&P 500 ticker with options.",
+                sp500=SP500_TICKERS
+            )
 
-            target_delta = RISK_TIERS[risk_key]
-            risk_label = RISK_LABELS[risk_key]
+        # Pull real delta + strike
+        result = get_closest_delta_strike(ticker, expiration, target_delta)
 
-            # Pull live price
-            current_price = get_current_price(ticker)
-
-            # Pull option chain + find closest delta strike
-            call_data = get_market_aware_call(ticker, expiration, target_delta)
-
-            strike = call_data["strike"]
-            premium = call_data["mid"]
-            actual_delta = call_data["delta"]
-
-            # Compute covered call metrics
-            metrics = compute_covered_call_metrics(shares, cost_basis, strike, premium)
-
-            # Bundle result for template
-            result = {
-                "ticker": ticker,
-                "current_price": current_price,
-                "risk_label": risk_label,
-                "target_delta": target_delta,
-                "expiration": expiration,
-                "strike": strike,
-                "premium": premium,
-                "actual_delta": actual_delta,
-                "shares": shares,
-                "cost_basis": cost_basis,
-                "total_cost_basis": metrics["total_cost_basis"],
-                "total_premium": metrics["total_premium"],
-                "breakeven": metrics["breakeven"],
-                "max_profit": metrics["max_profit"],
-                "max_profit_pct": metrics["max_profit_pct"],
-            }
-
-        except Exception as e:
-            error = str(e)
+        if result is None:
+            return render_template(
+                "index.html",
+                error="Unable to pull real delta data.",
+                sp500=SP500_TICKERS
+            )
 
     return render_template(
         "index.html",
-        ticker=ticker,
-        shares=shares,
-        cost_basis=cost_basis,
-        expiration=expiration,
         result=result,
-        error=error,
+        sp500=SP500_TICKERS
     )
-
 
 if __name__ == "__main__":
     app.run(debug=True)
