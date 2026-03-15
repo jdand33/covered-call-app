@@ -4,18 +4,55 @@
     <meta charset="utf-8">
     <title>Covered Call Picker</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+
     <style>
-        body { font-family: system-ui, -apple-system, sans-serif; margin: 1.5rem; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 1.5rem;
+            line-height: 1.4;
+        }
         .field { margin-bottom: 1rem; }
         label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-        input, select, button { width: 100%; max-width: 320px; padding: 0.4rem; font-size: 1rem; }
-        button { cursor: pointer; }
-        .error { color: #b00020; margin-bottom: 1rem; }
-        .card { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-top: 1.5rem; max-width: 480px; }
-        .row { display: flex; justify-content: space-between; margin-bottom: 0.25rem; }
-        .row span:first-child { font-weight: 600; }
+        input, select, button {
+            width: 100%;
+            max-width: 320px;
+            padding: 0.45rem;
+            font-size: 1rem;
+        }
+        button {
+            cursor: pointer;
+            background: #222;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            margin-top: 0.5rem;
+        }
+        .error {
+            color: #b00020;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-top: 1.5rem;
+            max-width: 480px;
+        }
+        .row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.35rem;
+        }
+        .row span:first-child {
+            font-weight: 600;
+        }
+        hr {
+            margin: 0.75rem 0;
+        }
     </style>
 </head>
+
 <body>
 
 <h1>Covered Call Picker</h1>
@@ -25,6 +62,8 @@
 {% endif %}
 
 <form method="post">
+
+    <!-- TICKER INPUT -->
     <div class="field">
         <label for="ticker">Ticker</label>
         <input list="tickers" name="ticker" id="ticker" autocomplete="off"
@@ -36,18 +75,24 @@
         </datalist>
     </div>
 
+    <!-- EXPIRATION DROPDOWN -->
     <div class="field">
         <label for="expiration">Expiration</label>
         <select name="expiration" id="expiration" required>
-            {% for exp in expirations %}
-                <option value="{{ exp }}"
-                    {% if last_inputs.expiration == exp %}selected{% endif %}>
-                    {{ exp }}
-                </option>
-            {% endfor %}
+            {% if expirations %}
+                {% for exp in expirations %}
+                    <option value="{{ exp }}"
+                        {% if last_inputs.expiration == exp %}selected{% endif %}>
+                        {{ exp }}
+                    </option>
+                {% endfor %}
+            {% else %}
+                <option value="">No expirations available</option>
+            {% endif %}
         </select>
     </div>
 
+    <!-- DELTA RANGE DROPDOWN -->
     <div class="field">
         <label for="risk">Risk Level (Target Delta)</label>
         <select name="risk" id="risk" required>
@@ -63,6 +108,7 @@
     <button type="submit">Find Call</button>
 </form>
 
+<!-- RESULT CARD -->
 {% if result %}
     <div class="card">
         <h2>Selected Call</h2>
@@ -70,6 +116,7 @@
         <div class="row"><span>Ticker</span><span>{{ result.ticker }}</span></div>
         <div class="row"><span>Risk Level</span><span>{{ result.risk_label }}</span></div>
         <div class="row"><span>Expiration</span><span>{{ result.expiration }} ({{ result.days }} days)</span></div>
+
         <div class="row"><span>Spot</span><span>${{ result.spot }}</span></div>
         <div class="row"><span>Strike</span><span>${{ result.strike }}</span></div>
         <div class="row"><span>Bid / Ask</span><span>${{ result.bid }} / ${{ result.ask }}</span></div>
