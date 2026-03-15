@@ -149,7 +149,6 @@ def index():
         result = {
             "ticker": ticker,
             "strike": round(real_strike, 2),
-            "theoretical": round(theoretical_strike, 2),
             "premium": round(premium, 2),
             "mid_price": round(mid, 2),
             "yield": round(yield_pct * 100, 2),        # %
