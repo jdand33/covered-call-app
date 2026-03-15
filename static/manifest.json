@@ -1,6 +1,6 @@
 {
-  "name": "Strike Calculator",
-  "short_name": "StrikeCalc",
+  "name": "Covered Call Strike Calculator",
+  "short_name": "CC Strike",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1c1c1e",
