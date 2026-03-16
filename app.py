@@ -13,62 +13,102 @@ RISK_TO_DELTA = {
 }
 
 
+# -----------------------------
+# VALIDATE TICKER
+# -----------------------------
 def validate_ticker(ticker: str) -> bool:
-    """Return True if ticker exists and has options."""
     try:
         t = yf.Ticker(ticker)
         info = t.fast_info
-        if not info or not getattr(info, "last_price", None):
+
+        if not info:
+            print("DEBUG: fast_info is empty")
             return False
+
+        if not getattr(info, "last_price", None):
+            print("DEBUG: last_price missing")
+            return False
+
         if not t.options:
+            print("DEBUG: ticker has no options")
             return False
+
         return True
-    except Exception:
+
+    except Exception as e:
+        print("VALIDATE_TICKER EXCEPTION:", e)
         return False
 
 
+# -----------------------------
+# GET EXPIRATIONS (WITH RETRY)
+# -----------------------------
 def get_expirations(ticker: str):
-    """Return list of option expirations with retry for cold starts."""
     try:
         t = yf.Ticker(ticker)
 
-        for _ in range(3):
+        for attempt in range(3):
             expirations = t.options
+            print(f"DEBUG: Expiration attempt {attempt+1}: {expirations}")
+
             if expirations:
                 return expirations
 
+        print("DEBUG: Expirations empty after retries")
         return []
-    except Exception:
+
+    except Exception as e:
+        print("GET_EXPIRATIONS EXCEPTION:", e)
         return []
 
 
+# -----------------------------
+# GET OPTION CHAIN + DELTA MATCH
+# -----------------------------
 def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
-    """
-    Return the call option closest to target_delta for given ticker/expiration.
-    Includes retry and safety checks for missing/empty data.
-    """
+    print("\n=== OPTION DEBUG START ===")
+    print("Ticker:", ticker)
+    print("Expiration:", expiration)
+
     try:
         t = yf.Ticker(ticker)
 
         calls = None
-        for _ in range(2):
+
+        # Retry twice for cold starts
+        for attempt in range(2):
             chain = t.option_chain(expiration)
             calls = chain.calls
-            if calls is not None and not calls.empty:
+            print(f"DEBUG: Chain attempt {attempt+1}, calls empty? {calls.empty}")
+
+            if not calls.empty:
                 break
 
         if calls is None or calls.empty:
+            print("DEBUG ERROR: Calls are empty")
+            print("=== OPTION DEBUG END ===\n")
             return None
 
+        print("DEBUG: Calls columns:", list(calls.columns))
+
         if "delta" not in calls.columns:
+            print("DEBUG ERROR: Delta column missing")
+            print("=== OPTION DEBUG END ===\n")
             return None
 
         calls = calls.dropna(subset=["delta"])
+        print("DEBUG: Calls after dropping NaN deltas:", len(calls))
+
         if calls.empty:
+            print("DEBUG ERROR: All deltas are NaN")
+            print("=== OPTION DEBUG END ===\n")
             return None
 
         calls["abs_diff"] = (calls["delta"] - target_delta).abs()
         best = calls.loc[calls["abs_diff"].idxmin()]
+
+        print("DEBUG: Selected contract:", best["contractSymbol"])
+        print("=== OPTION DEBUG END ===\n")
 
         return {
             "symbol": best["contractSymbol"],
@@ -79,10 +119,15 @@ def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
             "last": float(best["lastPrice"])
         }
 
-    except Exception:
+    except Exception as e:
+        print("OPTION_CHAIN EXCEPTION:", e)
+        print("=== OPTION DEBUG END ===\n")
         return None
 
 
+# -----------------------------
+# MAIN ROUTE
+# -----------------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -95,7 +140,14 @@ def index():
         expiration = request.form.get("expiration", "").strip()
         risk_key = request.form.get("risk", "").strip()
 
-        # Validate ticker first
+        print("\n=== FORM DEBUG ===")
+        print("Action:", action)
+        print("Ticker:", ticker)
+        print("Expiration from POST:", expiration)
+        print("Risk:", risk_key)
+        print("===================\n")
+
+        # Validate ticker
         if not ticker:
             return render_template("index.html",
                                    error="Please enter a ticker.",
@@ -104,21 +156,21 @@ def index():
         if not validate_ticker(ticker):
             return render_template("index.html",
                                    error=f"'{ticker}' is not a valid ticker with options.",
-                                   expirations=expirations)
+                                   expirations=[])
 
-        # Load expirations with retry
+        # Load expirations
         expirations = get_expirations(ticker)
         if not expirations:
             return render_template("index.html",
                                    error="No expirations available for this ticker.",
                                    expirations=[])
 
-        # If user clicked "Get Expirations", stop here and just show list
+        # If user clicked "Get Expirations"
         if action == "load":
             return render_template("index.html",
                                    expirations=expirations)
 
-        # From here on, user clicked "Calculate"
+        # User clicked "Calculate"
         if not expiration:
             return render_template("index.html",
                                    error="Please select an expiration.",
@@ -148,5 +200,8 @@ def index():
                            expirations=expirations)
 
 
+# -----------------------------
+# RUN APP
+# -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
