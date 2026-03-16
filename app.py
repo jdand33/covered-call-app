@@ -1,193 +1,111 @@
 from flask import Flask, render_template, request
 import yfinance as yf
-from datetime import datetime
 
 app = Flask(__name__)
 
-# --- S&P 500 list for autocomplete (shortened for example) ---
+# -----------------------------
+# S&P 500 TICKER LIST (sample)
+# -----------------------------
 SP500_TICKERS = [
-    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "MCD", "JPM", "XOM", "NVDA"
-    # ... include your full list here ...
+    "AAPL","MSFT","AMZN","NVDA","GOOGL","GOOG","META","BRK.B","LLY","TSLA","UNH","JPM","V","XOM",
+    "AVGO","PG","MA","HD","CVX","COST","ABBV","MRK","PEP","KO","WMT","BAC","ADBE","CRM","TMO",
+    "CSCO","MCD","ACN","ABT","LIN","DHR","NFLX","WFC","INTC","TXN","NEE","PM","MS","HON","UNP",
+    "AMGN","IBM","LOW","ORCL","SBUX","AMD","CAT","GS","GE","NOW","AMT","MDT","LMT","BLK","ISRG",
+    "CVS","SYK","PLD","BKNG","GILD","MDLZ","ADI","CI","ZTS","ADP","DE","MMC","MO","REGN","SPGI",
+    "ELV","TGT","BDX","SO","CB","CME","DUK","AON","PNC","ICE","NSC","CSX","EQIX","USB","SHW",
+    "APD","FDX","ITW","EW","GM","ETN","AEP","PSA","HCA","MCO","ROP","AIG","COF","FIS","FISV",
+    "MAR","KMB","D","ECL","EXC","AFL","ALL","A","MNST","LRCX","KLAC","NXPI","CDNS","SNPS","FTNT",
+    "PAYX","ORLY","ROST","CTAS","AZO","PH","MSI","IDXX","WELL","HUM","TRV","PRU","MET","AEE",
+    "ED","EIX","PEG","WEC","XEL"
 ]
+# (You can extend this to the full S&P 500 list if you like.)
 
-# --- Pretty labels for delta ranges ---
-DELTA_LABELS = {
-    "low": "Low (Δ ~0.10)",
-    "low_moderate": "Low‑Moderate (Δ ~0.15)",
-    "moderate": "Moderate (Δ ~0.20)",
-    "moderate_high": "Moderate‑High (Δ ~0.25)",
-    "high": "High (Δ ~0.30)"
-}
-
-# --- Numeric delta targets ---
-DELTA_TARGETS = {
-    "low": 0.10,
-    "low_moderate": 0.15,
-    "moderate": 0.20,
-    "moderate_high": 0.25,
-    "high": 0.30
-}
-
-# --- Fix for Series values coming from yfinance ---
-def safe_float(x):
+# -----------------------------
+# VALIDATE TICKER
+# -----------------------------
+def validate_ticker(ticker: str) -> bool:
     try:
-        if hasattr(x, "iloc"):
-            return float(x.iloc[0])
-        if isinstance(x, (list, tuple)):
-            return float(x[0])
-        return float(x)
-    except Exception:
-        return 0.0
+        t = yf.Ticker(ticker)
+        info = t.fast_info
 
-# --- Normalize entire option row to avoid Series errors ---
-def normalize_row(row):
-    clean = {}
-    for col, val in row.items():
-        clean[col] = safe_float(val)
-    return clean
+        # Must have valid price
+        if not info or info.last_price is None:
+            return False
 
-# --- Validate ticker using price history (fast_info is unreliable on Render) ---
-def is_valid_ticker(symbol: str) -> bool:
-    try:
-        df = yf.download(symbol, period="1d", progress=False)
-        return not df.empty
+        # Must have option chain
+        if not t.options:
+            return False
+
+        return True
     except Exception:
         return False
 
-# --- Get spot price reliably ---
-def get_spot_price(symbol: str) -> float:
-    df = yf.download(symbol, period="1d", progress=False)
-    return float(df["Close"].iloc[-1])
-
-# --- Get expiration dates safely ---
-def get_expiration_dates(ticker: str):
+# -----------------------------
+# GET CLOSEST DELTA STRIKE
+# -----------------------------
+def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
     try:
         t = yf.Ticker(ticker)
-        exps = t.options
-        return list(exps or [])
-    except Exception:
-        return []
+        chain = t.option_chain(expiration)
+        calls = chain.calls
 
-# --- Select call option closest to target delta ---
-def select_call_for_delta(ticker: str, expiration: str, target_delta: float):
-    t = yf.Ticker(ticker)
-    spot = get_spot_price(ticker)
+        # Remove rows without delta
+        calls = calls.dropna(subset=["delta"])
 
-    chain = t.option_chain(expiration)
-    calls = chain.calls.copy()
+        # Find strike with delta closest to target
+        calls["abs_diff"] = (calls["delta"] - target_delta).abs()
+        best = calls.loc[calls["abs_diff"].idxmin()]
 
-    if calls.empty:
-        raise ValueError("No call options returned for this expiration.")
+        return {
+            "symbol": best["contractSymbol"],
+            "strike": float(best["strike"]),
+            "delta": float(best["delta"]),
+            "bid": float(best["bid"]),
+            "ask": float(best["ask"]),
+            "last": float(best["lastPrice"]),
+        }
 
-    # If delta exists, use it
-    if "delta" in calls.columns:
-        calls["delta_diff"] = (calls["delta"].abs() - target_delta).abs()
-        best = calls.sort_values("delta_diff").iloc[0]
-    else:
-        # Fallback: closest strike to spot
-        calls["strike_diff"] = (calls["strike"] - spot).abs()
-        best = calls.sort_values("strike_diff").iloc[0]
+    except Exception as e:
+        print("Error pulling delta:", e)
+        return None
 
-    # 🔥 Normalize entire row so no Series survive
-    best = normalize_row(best)
-
-    return {
-        "ticker": ticker,
-        "expiration": expiration,
-        "spot": float(spot),
-        "strike": best.get("strike", 0.0),
-        "bid": best.get("bid", 0.0),
-        "ask": best.get("ask", 0.0),
-        "last": best.get("lastPrice", best.get("last", 0.0)),
-        "iv": best.get("impliedVolatility", 0.0),
-        "delta": best.get("delta", 0.0),
-    }
-
-# --- Days to expiration ---
-def compute_days_to_expiration(expiration: str) -> int:
-    try:
-        exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-        today = datetime.utcnow().date()
-        return (exp_date - today).days
-    except Exception:
-        return 0
-
+# -----------------------------
+# FLASK ROUTE
+# -----------------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
-    error = None
     result = None
-
-    ticker = "MCD"
-    risk = "moderate"
-    expiration = None
-    expirations = []
+    error = None
 
     if request.method == "POST":
-        ticker = request.form.get("ticker", ticker).upper().strip()
-        risk = request.form.get("risk", risk)
-        expiration = request.form.get("expiration") or None
+        ticker = request.form.get("ticker", "").upper().strip()
+        expiration = request.form.get("expiration", "").strip()
+        target_delta_raw = request.form.get("risk", "").strip()
 
-    # Validate ticker
-    if not is_valid_ticker(ticker):
-        error = f"'{ticker}' is not a valid ticker symbol."
-    else:
-        expirations = get_expiration_dates(ticker)
-
-        if not expirations:
-            error = f"No option expirations available for {ticker}."
-        else:
-            if expiration not in expirations:
-                expiration = expirations[0]
-
-    # Compute option selection
-    if not error and expiration and risk in DELTA_TARGETS:
-        target_delta = DELTA_TARGETS[risk]
-        risk_label = DELTA_LABELS[risk]
+        # Basic form validation
+        if not ticker or not expiration or not target_delta_raw:
+            error = "Please fill in all fields."
+            return render_template("index.html", error=error, result=result, sp500=SP500_TICKERS)
 
         try:
-            opt = select_call_for_delta(ticker, expiration, target_delta)
-            days = compute_days_to_expiration(expiration)
+            target_delta = float(target_delta_raw)
+        except ValueError:
+            error = "Invalid target delta."
+            return render_template("index.html", error=error, result=result, sp500=SP500_TICKERS)
 
-            mid = (opt["bid"] + opt["ask"]) / 2 if (opt["bid"] and opt["ask"]) else opt["last"]
-            premium = mid
-            notional = opt["spot"] * 100
-            raw_yield = premium * 100 / notional if notional else 0
-            annualized_yield = raw_yield * (365 / days) if days > 0 else 0
+        # Validate ticker
+        if ticker not in SP500_TICKERS or not validate_ticker(ticker):
+            error = f"'{ticker}' is not a valid S&P 500 ticker with options."
+            return render_template("index.html", error=error, result=result, sp500=SP500_TICKERS)
 
-            result = {
-                "ticker": opt["ticker"],
-                "expiration": opt["expiration"],
-                "spot": round(opt["spot"], 2),
-                "strike": round(opt["strike"], 2),
-                "bid": round(opt["bid"], 2),
-                "ask": round(opt["ask"], 2),
-                "last": round(opt["last"], 2),
-                "iv": round(opt["iv"] * 100, 2),
-                "delta": round(opt["delta"], 3),
-                "days": days,
-                "premium": round(premium, 2),
-                "raw_yield": round(raw_yield * 100, 2),
-                "annualized_yield": round(annualized_yield * 100, 2),
-                "risk_label": risk_label,
-            }
-        except Exception as e:
-            error = f"Error pulling option data for {ticker}: {e}"
+        # Pull real delta + strike
+        result = get_closest_delta_strike(ticker, expiration, target_delta)
 
-    last_inputs = {
-        "ticker": ticker,
-        "risk": risk,
-        "expiration": expiration,
-    }
+        if result is None:
+            error = "Unable to pull real delta data for that expiration."
+            return render_template("index.html", error=error, result=None, sp500=SP500_TICKERS)
 
-    return render_template(
-        "index.html",
-        sp500=SP500_TICKERS,
-        delta_labels=DELTA_LABELS,
-        expirations=expirations,
-        last_inputs=last_inputs,
-        result=result,
-        error=error,
-    )
+    return render_template("index.html", error=error, result=result, sp500=SP500_TICKERS)
 
 if __name__ == "__main__":
     app.run(debug=True)
