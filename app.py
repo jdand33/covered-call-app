@@ -1,10 +1,27 @@
 from flask import Flask, render_template, request
 import yfinance as yf
+import requests
+import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Risk categories mapped to approximate deltas
+# ---------------------------------------------------------
+# TRADIER CONFIG
+# ---------------------------------------------------------
+TRADIER_KEY = os.getenv("TRADIER_KEY")
+
+# Choose one:
+TRADIER_URL = "https://sandbox.tradier.com/v1/markets/options/chains"
+# For live data (real-time):
+# TRADIER_URL = "https://api.tradier.com/v1/markets/options/chains"
+
+HEADERS = {
+    "Authorization": f"Bearer {TRADIER_KEY}",
+    "Accept": "application/json"
+}
+
+# Risk tiers mapped to target deltas
 RISK_TO_DELTA = {
     "very_safe": 0.10,
     "safe": 0.15,
@@ -13,9 +30,9 @@ RISK_TO_DELTA = {
     "very_aggressive": 0.30
 }
 
-# -----------------------------
+# ---------------------------------------------------------
 # VALIDATE TICKER
-# -----------------------------
+# ---------------------------------------------------------
 def validate_ticker(ticker: str) -> bool:
     try:
         t = yf.Ticker(ticker)
@@ -29,10 +46,6 @@ def validate_ticker(ticker: str) -> bool:
             print("DEBUG: last_price missing")
             return False
 
-        if not t.options:
-            print("DEBUG: ticker has no options")
-            return False
-
         return True
 
     except Exception as e:
@@ -40,132 +53,78 @@ def validate_ticker(ticker: str) -> bool:
         return False
 
 
-# -----------------------------
-# GET EXPIRATIONS (WITH RETRY)
-# -----------------------------
+# ---------------------------------------------------------
+# GET EXPIRATIONS (YFINANCE)
+# ---------------------------------------------------------
 def get_expirations(ticker: str):
     try:
         t = yf.Ticker(ticker)
-
-        for attempt in range(3):
-            expirations = t.options
-            print(f"DEBUG: Expiration attempt {attempt+1}: {expirations}")
-
-            if expirations:
-                return expirations
-
-        print("DEBUG: Expirations empty after retries")
-        return []
-
+        expirations = t.options
+        print("DEBUG: Expirations:", expirations)
+        return expirations
     except Exception as e:
         print("GET_EXPIRATIONS EXCEPTION:", e)
         return []
 
 
-# -----------------------------
-# GET OPTION CHAIN + DELTA MATCH
-# -----------------------------
-def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
-    print("\n=== OPTION DEBUG START ===")
-    print("Ticker:", ticker)
-    print("Expiration:", expiration)
+# ---------------------------------------------------------
+# GET OPTION CHAIN FROM TRADIER
+# ---------------------------------------------------------
+def get_tradier_chain(ticker: str, expiration: str):
+    params = {
+        "symbol": ticker,
+        "expiration": expiration,
+        "greeks": "true"
+    }
+
+    print("DEBUG: Tradier request:", params)
 
     try:
-        t = yf.Ticker(ticker)
+        r = requests.get(TRADIER_URL, headers=HEADERS, params=params)
 
-        # Get current price for fallback logic
-        last_price = None
-        try:
-            fi = t.fast_info
-            last_price = getattr(fi, "last_price", None)
-            print("DEBUG: last_price:", last_price)
-        except Exception as e:
-            print("DEBUG: fast_info error:", e)
-
-        calls = None
-
-        # Retry twice for cold starts
-        for attempt in range(2):
-            chain = t.option_chain(expiration)
-            calls = chain.calls
-            print(f"DEBUG: Chain attempt {attempt+1}, calls empty? {calls.empty}")
-
-            if not calls.empty:
-                break
-
-        if calls is None or calls.empty:
-            print("DEBUG ERROR: Calls are empty")
-            print("=== OPTION DEBUG END ===\n")
+        if r.status_code != 200:
+            print("TRADIER ERROR:", r.text)
             return None
 
-        print("DEBUG: Calls columns:", list(calls.columns))
+        data = r.json()
 
-        # -----------------------------
-        # CASE 1: DELTA EXISTS → USE IT
-        # -----------------------------
-        if "delta" in calls.columns:
-            calls = calls.dropna(subset=["delta"])
-            print("DEBUG: Calls after dropping NaN deltas:", len(calls))
+        if "options" not in data or data["options"] is None:
+            print("TRADIER: No options returned")
+            return None
 
-            if not calls.empty:
-                calls["abs_diff"] = (calls["delta"] - target_delta).abs()
-                best = calls.loc[calls["abs_diff"].idxmin()]
-                print("DEBUG: Selected by delta:", best["contractSymbol"])
-
-                return {
-                    "symbol": best["contractSymbol"],
-                    "strike": float(best["strike"]),
-                    "delta": float(best["delta"]),
-                    "bid": float(best["bid"]),
-                    "ask": float(best["ask"]),
-                    "last": float(best["lastPrice"]),
-                    "iv": float(best["impliedVolatility"]) if "impliedVolatility" in best else None
-                }
-
-            print("DEBUG: Delta exists but all NaN — falling back to strike logic")
-
-        # -----------------------------
-        # CASE 2: NO DELTA → FALLBACK
-        # -----------------------------
-        print("DEBUG: Using strike-based fallback")
-
-        if last_price is None:
-            mid_idx = len(calls) // 2
-            best = calls.iloc[mid_idx]
-            print("DEBUG: No last_price, picked middle strike:", best["contractSymbol"])
-        else:
-            calls["moneyness"] = calls["strike"] - last_price
-            otm = calls[calls["moneyness"] >= 0]
-
-            if not otm.empty:
-                best = otm.loc[otm["moneyness"].idxmin()]
-                print("DEBUG: Picked nearest OTM strike:", best["contractSymbol"])
-            else:
-                calls["abs_diff_strike"] = (calls["strike"] - last_price).abs()
-                best = calls.loc[calls["abs_diff_strike"].idxmin()]
-                print("DEBUG: All ITM, picked closest strike:", best["contractSymbol"])
-
-        print("=== OPTION DEBUG END ===\n")
-
-        return {
-            "symbol": best["contractSymbol"],
-            "strike": float(best["strike"]),
-            "delta": None,
-            "bid": float(best["bid"]),
-            "ask": float(best["ask"]),
-            "last": float(best["lastPrice"]),
-            "iv": float(best["impliedVolatility"]) if "impliedVolatility" in best else None
-        }
+        return data["options"]["option"]
 
     except Exception as e:
-        print("OPTION_CHAIN EXCEPTION:", e)
-        print("=== OPTION DEBUG END ===\n")
+        print("TRADIER REQUEST EXCEPTION:", e)
         return None
 
 
-# -----------------------------
+# ---------------------------------------------------------
+# SELECT STRIKE BY DELTA
+# ---------------------------------------------------------
+def select_by_delta(options, target_delta):
+    best = None
+    best_diff = 999
+
+    for opt in options:
+        if opt["option_type"] != "call":
+            continue
+
+        delta = opt.get("greeks", {}).get("delta")
+        if delta is None:
+            continue
+
+        diff = abs(delta - target_delta)
+        if diff < best_diff:
+            best_diff = diff
+            best = opt
+
+    return best
+
+
+# ---------------------------------------------------------
 # MAIN ROUTE
-# -----------------------------
+# ---------------------------------------------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -181,7 +140,7 @@ def index():
         print("\n=== FORM DEBUG ===")
         print("Action:", action)
         print("Ticker:", ticker)
-        print("Expiration from POST:", expiration)
+        print("Expiration:", expiration)
         print("Risk:", risk_key)
         print("===================\n")
 
@@ -189,18 +148,18 @@ def index():
         if not ticker:
             return render_template("index.html",
                                    error="Please enter a ticker.",
-                                   expirations=expirations)
+                                   expirations=[])
 
         if not validate_ticker(ticker):
             return render_template("index.html",
-                                   error=f"'{ticker}' is not a valid ticker with options.",
+                                   error=f"'{ticker}' is not a valid ticker.",
                                    expirations=[])
 
         # Load expirations
         expirations = get_expirations(ticker)
         if not expirations:
             return render_template("index.html",
-                                   error="No expirations available for this ticker.",
+                                   error="No expirations available.",
                                    expirations=[])
 
         # If user clicked "Get Expirations"
@@ -209,58 +168,58 @@ def index():
                                    expirations=expirations)
 
         # User clicked "Calculate"
-        if not expiration:
-            return render_template("index.html",
-                                   error="Please select an expiration.",
-                                   expirations=expirations)
-
         if expiration not in expirations:
             return render_template("index.html",
-                                   error=f"{expiration} is not a valid expiration.",
-                                   expirations=expirations)
-
-        if risk_key not in RISK_TO_DELTA:
-            return render_template("index.html",
-                                   error="Invalid risk level.",
+                                   error="Invalid expiration.",
                                    expirations=expirations)
 
         target_delta = RISK_TO_DELTA[risk_key]
 
-        # Get option result
-        result = get_closest_delta_strike(ticker, expiration, target_delta)
-        if result is None:
+        # Get Tradier chain
+        chain = get_tradier_chain(ticker, expiration)
+        if chain is None:
             return render_template("index.html",
                                    error="Unable to pull option data.",
                                    expirations=expirations)
 
-        # -----------------------------
-        # ADD ENHANCED OUTPUT FIELDS
-        # -----------------------------
+        # Select strike by delta
+        best = select_by_delta(chain, target_delta)
+        if best is None:
+            return render_template("index.html",
+                                   error="No valid delta data.",
+                                   expirations=expirations)
 
-        # Stock price
+        # ---------------------------------------------------------
+        # BUILD RESULT OBJECT
+        # ---------------------------------------------------------
         t = yf.Ticker(ticker)
         fi = t.fast_info
-        result["stock_price"] = getattr(fi, "last_price", None)
+        stock_price = getattr(fi, "last_price", None)
 
-        # Days until expiration
         exp_date = datetime.strptime(expiration, "%Y-%m-%d")
         today = datetime.utcnow()
-        result["days_out"] = (exp_date - today).days
+        days_out = (exp_date - today).days
 
-        # Risk label
-        result["risk_label"] = risk_key.replace("_", " ").title()
+        bid = best.get("bid", 0)
+        ask = best.get("ask", 0)
+        mid = round((bid + ask) / 2, 2)
+        premium = round(mid * 100, 2)
 
-        # Mid price
-        result["mid"] = round((result["bid"] + result["ask"]) / 2, 2)
+        delta = best.get("greeks", {}).get("delta")
+        assign_prob = round(abs(delta) * 100, 1) if delta else None
 
-        # Premium (mid × 100)
-        result["premium"] = round(result["mid"] * 100, 2)
-
-        # Assignment probability
-        if result["delta"] is not None:
-            result["assign_prob"] = round(abs(result["delta"]) * 100, 1)
-        else:
-            result["assign_prob"] = None
+        result = {
+            "ticker": ticker,
+            "stock_price": stock_price,
+            "expiration": expiration,
+            "days_out": days_out,
+            "risk_label": risk_key.replace("_", " ").title(),
+            "strike": best["strike"],
+            "iv": best.get("greeks", {}).get("iv"),
+            "assign_prob": assign_prob,
+            "mid": mid,
+            "premium": premium
+        }
 
     return render_template("index.html",
                            result=result,
@@ -268,8 +227,8 @@ def index():
                            expirations=expirations)
 
 
-# -----------------------------
+# ---------------------------------------------------------
 # RUN APP
-# -----------------------------
+# ---------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
