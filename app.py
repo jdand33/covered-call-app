@@ -7,10 +7,14 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# TRADIER CONFIG (LIVE MODE)
+# API KEYS (with fallback for Railway)
 # ---------------------------------------------------------
 TRADIER_KEY = os.getenv("TRADIER_KEY") or "Adg17LaQudeoRTdAgQxXUwB3nfWA"
+POLYGON_KEY = os.getenv("POLYGON_KEY") or "nVuq_7o7g8SeySvC1zYPZY6drDdhbEv4"
 
+# ---------------------------------------------------------
+# TRADIER ENDPOINTS (LIVE)
+# ---------------------------------------------------------
 TRADIER_EXP_URL = "https://api.tradier.com/v1/markets/options/expirations"
 TRADIER_CHAIN_URL = "https://api.tradier.com/v1/markets/options/chains"
 
@@ -19,7 +23,9 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Risk tiers mapped to target deltas
+# ---------------------------------------------------------
+# RISK DELTA TARGETS
+# ---------------------------------------------------------
 RISK_TO_DELTA = {
     "very_safe": 0.10,
     "safe": 0.15,
@@ -35,39 +41,30 @@ def validate_ticker(ticker: str) -> bool:
     try:
         t = yf.Ticker(ticker)
         info = t.fast_info
-
         if not info:
             return False
-
         if not getattr(info, "last_price", None):
             return False
-
         return True
-
     except Exception:
         return False
 
-
 # ---------------------------------------------------------
-# GET EXPIRATIONS FROM TRADIER (LIVE)
+# TRADIER: GET EXPIRATIONS
 # ---------------------------------------------------------
 def get_tradier_expirations(ticker: str):
     try:
         params = {"symbol": ticker}
         r = requests.get(TRADIER_EXP_URL, headers=HEADERS, params=params)
-
         if r.status_code != 200:
             return []
-
         data = r.json()
         return data.get("expirations", {}).get("date", [])
-
     except Exception:
         return []
 
-
 # ---------------------------------------------------------
-# GET OPTION CHAIN FROM TRADIER (LIVE)
+# TRADIER: GET OPTION CHAIN
 # ---------------------------------------------------------
 def get_tradier_chain(ticker: str, expiration: str):
     params = {
@@ -75,42 +72,32 @@ def get_tradier_chain(ticker: str, expiration: str):
         "expiration": expiration,
         "greeks": "true"
     }
-
     try:
         r = requests.get(TRADIER_CHAIN_URL, headers=HEADERS, params=params)
-
         if r.status_code != 200:
             return None
-
         data = r.json()
-
         if "options" not in data or data["options"] is None:
             return None
-
         return data["options"]["option"]
-
     except Exception:
         return None
 
-
 # ---------------------------------------------------------
-# SELECT STRIKE BY DELTA (WITH LIQUIDITY FILTER)
+# SELECT STRIKE BY DELTA
 # ---------------------------------------------------------
 def select_by_delta(options, target_delta):
     best = None
     best_diff = 999
-
     for opt in options:
         if opt["option_type"] != "call":
             continue
 
-        # Skip illiquid strikes
         bid = opt.get("bid", 0)
         ask = opt.get("ask", 0)
         if bid == 0 and ask == 0:
             continue
 
-        # Skip missing greeks
         delta = opt.get("greeks", {}).get("delta")
         if delta is None:
             continue
@@ -122,6 +109,31 @@ def select_by_delta(options, target_delta):
 
     return best
 
+# ---------------------------------------------------------
+# POLYGON: BUILD OCC SYMBOL
+# ---------------------------------------------------------
+def build_polygon_symbol(ticker, expiration, strike, option_type="call"):
+    y, m, d = expiration.split("-")
+    yy = y[2:]
+    cp = "C" if option_type == "call" else "P"
+    strike_int = int(float(strike) * 1000)
+    strike_str = f"{strike_int:08d}"
+    return f"{ticker.upper()}{yy}{m}{d}{cp}{strike_str}"
+
+# ---------------------------------------------------------
+# POLYGON: GET IV
+# ---------------------------------------------------------
+def get_polygon_iv(option_symbol: str):
+    url = f"https://api.polygon.io/v3/reference/options/{option_symbol}"
+    params = {"apiKey": POLYGON_KEY}
+    try:
+        r = requests.get(url, params=params)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return data.get("results", {}).get("implied_volatility")
+    except Exception:
+        return None
 
 # ---------------------------------------------------------
 # MAIN ROUTE
@@ -138,54 +150,32 @@ def index():
         expiration = request.form.get("expiration", "").strip()
         risk_key = request.form.get("risk", "").strip()
 
-        # Validate ticker
         if not ticker:
-            return render_template("index.html",
-                                   error="Please enter a ticker.",
-                                   expirations=[])
+            return render_template("index.html", error="Please enter a ticker.", expirations=[])
 
         if not validate_ticker(ticker):
-            return render_template("index.html",
-                                   error=f"'{ticker}' is not a valid ticker.",
-                                   expirations=[])
+            return render_template("index.html", error=f"'{ticker}' is not a valid ticker.", expirations=[])
 
-        # Load Tradier expirations
         expirations = get_tradier_expirations(ticker)
         if not expirations:
-            return render_template("index.html",
-                                   error="No expirations available.",
-                                   expirations=[])
+            return render_template("index.html", error="No expirations available.", expirations=[])
 
-        # If user clicked "Get Expirations"
         if action == "load":
-            return render_template("index.html",
-                                   expirations=expirations)
+            return render_template("index.html", expirations=expirations)
 
-        # User clicked "Calculate"
         if expiration not in expirations:
-            return render_template("index.html",
-                                   error="Invalid expiration.",
-                                   expirations=expirations)
+            return render_template("index.html", error="Invalid expiration.", expirations=expirations)
 
         target_delta = RISK_TO_DELTA[risk_key]
 
-        # Get Tradier chain
         chain = get_tradier_chain(ticker, expiration)
         if chain is None:
-            return render_template("index.html",
-                                   error="Unable to pull option data.",
-                                   expirations=expirations)
+            return render_template("index.html", error="Unable to pull option data.", expirations=expirations)
 
-        # Select strike by delta
         best = select_by_delta(chain, target_delta)
         if best is None:
-            return render_template("index.html",
-                                   error="No liquid strikes found for this risk level.",
-                                   expirations=expirations)
+            return render_template("index.html", error="No liquid strikes found for this risk level.", expirations=expirations)
 
-        # ---------------------------------------------------------
-        # BUILD RESULT OBJECT
-        # ---------------------------------------------------------
         t = yf.Ticker(ticker)
         fi = t.fast_info
         stock_price = getattr(fi, "last_price", None)
@@ -202,6 +192,12 @@ def index():
         delta = best.get("greeks", {}).get("delta")
         assign_prob = round(abs(delta) * 100, 1) if delta else None
 
+        # Polygon IV
+        poly_symbol = build_polygon_symbol(ticker, expiration, best["strike"])
+        poly_iv = get_polygon_iv(poly_symbol)
+
+        iv_value = poly_iv if poly_iv is not None else best.get("greeks", {}).get("iv")
+
         result = {
             "ticker": ticker,
             "stock_price": stock_price,
@@ -209,17 +205,13 @@ def index():
             "days_out": days_out,
             "risk_label": risk_key.replace("_", " ").title(),
             "strike": best["strike"],
-            "iv": best.get("greeks", {}).get("iv"),
+            "iv": iv_value,
             "assign_prob": assign_prob,
             "mid": mid,
             "premium": premium
         }
 
-    return render_template("index.html",
-                           result=result,
-                           error=error,
-                           expirations=expirations)
-
+    return render_template("index.html", result=result, error=error, expirations=expirations)
 
 # ---------------------------------------------------------
 # RUN APP
