@@ -254,7 +254,6 @@ def index():
             "strike": best["strike"],
             "iv": iv_value,
             "assign_prob": assign_prob,
-            "mid": mid,
             "premium": premium
         }
 
