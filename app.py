@@ -12,7 +12,6 @@ RISK_TO_DELTA = {
     "very_aggressive": 0.30
 }
 
-
 # -----------------------------
 # VALIDATE TICKER
 # -----------------------------
@@ -22,7 +21,7 @@ def validate_ticker(ticker: str) -> bool:
         info = t.fast_info
 
         if not info:
-            print("DEBUG: fast_info is empty")
+            print("DEBUG: fast_info empty")
             return False
 
         if not getattr(info, "last_price", None):
@@ -78,7 +77,7 @@ def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
         try:
             fi = t.fast_info
             last_price = getattr(fi, "last_price", None)
-            print("DEBUG: last_price from fast_info:", last_price)
+            print("DEBUG: last_price:", last_price)
         except Exception as e:
             print("DEBUG: fast_info error:", e)
 
@@ -100,49 +99,59 @@ def get_closest_delta_strike(ticker: str, expiration: str, target_delta: float):
 
         print("DEBUG: Calls columns:", list(calls.columns))
 
-        # If delta exists, use it (preferred path)
+        # -----------------------------
+        # CASE 1: DELTA EXISTS → USE IT
+        # -----------------------------
         if "delta" in calls.columns:
             calls = calls.dropna(subset=["delta"])
             print("DEBUG: Calls after dropping NaN deltas:", len(calls))
 
-            if calls.empty:
-                print("DEBUG ERROR: All deltas are NaN")
-                print("=== OPTION DEBUG END ===\n")
-                return None
+            if not calls.empty:
+                calls["abs_diff"] = (calls["delta"] - target_delta).abs()
+                best = calls.loc[calls["abs_diff"].idxmin()]
+                print("DEBUG: Selected by delta:", best["contractSymbol"])
 
-            calls["abs_diff"] = (calls["delta"] - target_delta).abs()
-            best = calls.loc[calls["abs_diff"].idxmin()]
-            print("DEBUG: Selected by delta:", best["contractSymbol"])
+                return {
+                    "symbol": best["contractSymbol"],
+                    "strike": float(best["strike"]),
+                    "delta": float(best["delta"]),
+                    "bid": float(best["bid"]),
+                    "ask": float(best["ask"]),
+                    "last": float(best["lastPrice"])
+                }
 
+            print("DEBUG: Delta exists but all NaN — falling back to strike logic")
+
+        # -----------------------------
+        # CASE 2: NO DELTA → FALLBACK
+        # -----------------------------
+        print("DEBUG: Using strike-based fallback")
+
+        if last_price is None:
+            # No price → pick middle strike
+            mid_idx = len(calls) // 2
+            best = calls.iloc[mid_idx]
+            print("DEBUG: No last_price, picked middle strike:", best["contractSymbol"])
         else:
-            # Fallback: no delta column → choose nearest OTM call by strike
-            print("DEBUG: Delta column missing, using strike-based fallback")
+            # Prefer nearest OTM strike
+            calls["moneyness"] = calls["strike"] - last_price
+            otm = calls[calls["moneyness"] >= 0]
 
-            if last_price is None:
-                # If we don't even have a price, just pick middle strike
-                mid_idx = len(calls) // 2
-                best = calls.iloc[mid_idx]
-                print("DEBUG: No last_price, picked middle strike:", best["contractSymbol"])
+            if not otm.empty:
+                best = otm.loc[otm["moneyness"].idxmin()]
+                print("DEBUG: Picked nearest OTM strike:", best["contractSymbol"])
             else:
-                # Prefer strikes >= last_price, closest to last_price
-                calls["moneyness"] = calls["strike"] - last_price
-                otm = calls[calls["moneyness"] >= 0]
-
-                if not otm.empty:
-                    best = otm.loc[otm["moneyness"].idxmin()]
-                    print("DEBUG: Picked nearest OTM strike:", best["contractSymbol"])
-                else:
-                    # If all strikes are ITM, pick closest by absolute distance
-                    calls["abs_diff_strike"] = (calls["strike"] - last_price).abs()
-                    best = calls.loc[calls["abs_diff_strike"].idxmin()]
-                    print("DEBUG: All ITM, picked closest strike:", best["contractSymbol"])
+                # All ITM → pick closest strike
+                calls["abs_diff_strike"] = (calls["strike"] - last_price).abs()
+                best = calls.loc[calls["abs_diff_strike"].idxmin()]
+                print("DEBUG: All ITM, picked closest strike:", best["contractSymbol"])
 
         print("=== OPTION DEBUG END ===\n")
 
         return {
             "symbol": best["contractSymbol"],
             "strike": float(best["strike"]),
-            "delta": float(best["delta"]) if "delta" in calls.columns else None,
+            "delta": None,  # no delta available
             "bid": float(best["bid"]),
             "ask": float(best["ask"]),
             "last": float(best["lastPrice"])
