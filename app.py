@@ -62,7 +62,6 @@ def get_tradier_chain(ticker, expiration):
 
 def black_scholes_iv(price, strike, days, premium):
     try:
-        # Simple fallback IV estimate
         t = days / 365
         if t <= 0:
             return None
@@ -73,7 +72,33 @@ def black_scholes_iv(price, strike, days, premium):
 
 
 # -----------------------------
-# ROUTES
+# DEBUG ENDPOINT
+# -----------------------------
+@app.route("/debug")
+def debug():
+    token_present = TRADIER_TOKEN is not None and len(TRADIER_TOKEN.strip()) > 0
+
+    try:
+        r = requests.get(
+            "https://api.tradier.com/v1/markets/quotes",
+            headers=HEADERS,
+            params={"symbols": "AAPL"}
+        )
+        status = r.status_code
+        valid_token = (status == 200)
+    except Exception as e:
+        status = f"Error: {e}"
+        valid_token = False
+
+    return {
+        "token_present": token_present,
+        "token_valid": valid_token,
+        "tradier_status_code": status
+    }
+
+
+# -----------------------------
+# MAIN ROUTE
 # -----------------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -93,7 +118,6 @@ def index():
         # -----------------------------
         if action == "load":
             raw_exps = get_tradier_expirations(ticker)
-
             expirations = [{"date": e, "earnings_week": False} for e in raw_exps]
 
             return render_template("index.html",
