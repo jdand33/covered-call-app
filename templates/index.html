@@ -1,62 +1,138 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Covered Call Calculator</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .container {
+            max-width: 480px;
+            margin: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        label {
+            font-weight: bold;
+            display: block;
+            margin-top: 12px;
+        }
+
+        input, select, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 6px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+            font-size: 16px;
+        }
+
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            margin-top: 16px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        .error {
+            color: red;
+            margin-top: 15px;
+            font-weight: bold;
+        }
+
+        .result-box {
+            margin-top: 20px;
+            background: #fafafa;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        }
+
+        .result-box p {
+            margin: 6px 0;
+        }
+    </style>
 </head>
+
 <body>
+<div class="container">
 
-<h2>Covered Call Calculator</h2>
+    <h2>Covered Call Calculator</h2>
 
-<form method="POST">
-    <label>Ticker:</label>
-    <input type="text" name="ticker" required>
+    <form method="POST">
 
-    <button type="submit" name="action" value="load">Load Expirations</button>
+        <!-- Ticker -->
+        <label for="ticker">Ticker:</label>
+        <input type="text" name="ticker" id="ticker" required>
 
-    {% if expirations %}
-        <label>Expiration:</label>
-        <select name="expiration">
-            {% for exp in expirations %}
-                <option value="{{ exp.date }}"
-                    {% if exp.earnings_week %}
-                        style="color:red; font-weight:bold;"
-                    {% endif %}
-                >
-                    {{ exp.date }}
-                    {% if exp.earnings_week %}(Earnings Week){% endif %}
-                </option>
-            {% endfor %}
+        <!-- Load Expirations -->
+        <button type="submit" name="action" value="load">Load Expirations</button>
+
+        <!-- Expiration Dropdown -->
+        {% if expirations %}
+            <label for="expiration">Expiration:</label>
+            <select name="expiration" id="expiration">
+                {% for exp in expirations %}
+                    <option value="{{ exp.date }}"
+                        {% if exp.earnings_week %}
+                            style="color:red; font-weight:bold;"
+                        {% endif %}
+                    >
+                        {{ exp.date }}
+                        {% if exp.earnings_week %}(Earnings Week){% endif %}
+                    </option>
+                {% endfor %}
+            </select>
+        {% endif %}
+
+        <!-- Risk Level -->
+        <label for="risk">Risk Level:</label>
+        <select name="risk" id="risk">
+            <option value="very_safe">Very Safe</option>
+            <option value="safe">Safe</option>
+            <option value="moderate">Moderate</option>
+            <option value="aggressive">Aggressive</option>
+            <option value="very_aggressive">Very Aggressive</option>
         </select>
+
+        <!-- Calculate -->
+        <button type="submit">Calculate</button>
+    </form>
+
+    <!-- Error Message -->
+    {% if error %}
+        <div class="error">{{ error }}</div>
     {% endif %}
 
-    <label>Risk Level:</label>
-    <select name="risk">
-        <option value="very_safe">Very Safe</option>
-        <option value="safe">Safe</option>
-        <option value="moderate">Moderate</option>
-        <option value="aggressive">Aggressive</option>
-        <option value="very_aggressive">Very Aggressive</option>
-    </select>
+    <!-- Results -->
+    {% if result %}
+        <div class="result-box">
+            <p><strong>Ticker:</strong> {{ result.ticker }}</p>
+            <p><strong>Stock Price:</strong> {{ result.stock_price }}</p>
+            <p><strong>Expiration:</strong> {{ result.expiration }} ({{ result.days_out }} days)</p>
+            <p><strong>Risk Level:</strong> {{ result.risk_label }}</p>
+            <p><strong>Strike Price:</strong> {{ result.strike }}</p>
+            <p><strong>Implied Volatility:</strong> {{ result.iv }}</p>
+            <p><strong>Assignment Probability:</strong> {{ result.assign_prob }}%</p>
+            <p><strong>Premium Collected:</strong> {{ result.premium }}</p>
+        </div>
+    {% endif %}
 
-    <button type="submit">Calculate</button>
-</form>
-
-{% if error %}
-    <div style="color:red; margin-top:10px;">{{ error }}</div>
-{% endif %}
-
-{% if result %}
-    <div style="margin-top:20px;">
-        <p><strong>Ticker:</strong> {{ result.ticker }}</p>
-        <p><strong>Stock Price:</strong> {{ result.stock_price }}</p>
-        <p><strong>Expiration:</strong> {{ result.expiration }} ({{ result.days_out }} days)</p>
-        <p><strong>Risk Level:</strong> {{ result.risk_label }}</p>
-        <p><strong>Strike Price:</strong> {{ result.strike }}</p>
-        <p><strong>Implied Volatility:</strong> {{ result.iv }}</p>
-        <p><strong>Assignment Probability:</strong> {{ result.assign_prob }}%</p>
-        <p><strong>Premium:</strong> {{ result.premium }}</p>
-    </div>
-{% endif %}
-
+</div>
 </body>
 </html>
