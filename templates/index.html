@@ -74,7 +74,7 @@
     <form method="POST">
         <input type="hidden" name="action" id="action">
 
-        <!-- Ticker (preserved after POST) -->
+        <!-- Ticker -->
         <label>Ticker</label>
         <input 
             name="ticker"
@@ -83,12 +83,12 @@
             required
         >
 
-        <!-- Get Expirations button -->
+        <!-- Get Expirations -->
         <button type="submit" onclick="document.getElementById('action').value='load'">
             Get Expirations
         </button>
 
-        <!-- Expiration dropdown (preserves selection) -->
+        <!-- Expiration dropdown -->
         <label>Expiration</label>
         <select name="expiration" id="expirationSelect">
             {% for exp in expirations %}
@@ -99,32 +99,17 @@
             {% endfor %}
         </select>
 
-        <!-- Risk level -->
+        <!-- Risk -->
         <label>Risk Level</label>
         <select name="risk" required>
-            <option value="very_safe"
-                {% if request.form.get('risk') == 'very_safe' %}selected{% endif %}>
-                Very Safe (Δ ≈ 0.10)
-            </option>
-            <option value="safe"
-                {% if request.form.get('risk') == 'safe' %}selected{% endif %}>
-                Safe (Δ ≈ 0.15)
-            </option>
-            <option value="moderate"
-                {% if request.form.get('risk', 'moderate') == 'moderate' %}selected{% endif %}>
-                Moderate (Δ ≈ 0.20)
-            </option>
-            <option value="aggressive"
-                {% if request.form.get('risk') == 'aggressive' %}selected{% endif %}>
-                Aggressive (Δ ≈ 0.25)
-            </option>
-            <option value="very_aggressive"
-                {% if request.form.get('risk') == 'very_aggressive' %}selected{% endif %}>
-                Very Aggressive (Δ ≈ 0.30)
-            </option>
+            <option value="very_safe" {% if request.form.get('risk') == 'very_safe' %}selected{% endif %}>Very Safe (Δ ≈ 0.10)</option>
+            <option value="safe" {% if request.form.get('risk') == 'safe' %}selected{% endif %}>Safe (Δ ≈ 0.15)</option>
+            <option value="moderate" {% if request.form.get('risk','moderate') == 'moderate' %}selected{% endif %}>Moderate (Δ ≈ 0.20)</option>
+            <option value="aggressive" {% if request.form.get('risk') == 'aggressive' %}selected{% endif %}>Aggressive (Δ ≈ 0.25)</option>
+            <option value="very_aggressive" {% if request.form.get('risk') == 'very_aggressive' %}selected{% endif %}>Very Aggressive (Δ ≈ 0.30)</option>
         </select>
 
-        <!-- Calculate button (disabled until expiration selected) -->
+        <!-- Calculate -->
         <button id="calculateBtn" type="submit"
                 onclick="document.getElementById('action').value='calculate'"
                 disabled>
@@ -140,7 +125,19 @@
         <div class="result">
             <div class="row"><span>Option:</span><span>{{ result.symbol }}</span></div>
             <div class="row"><span>Strike:</span><span>{{ result.strike }}</span></div>
-            <div class="row"><span>Delta:</span><span>{{ result.delta | round(3) }}</span></div>
+
+            <!-- SAFE DELTA DISPLAY -->
+            <div class="row">
+                <span>Delta:</span>
+                <span>
+                    {% if result.delta is not none %}
+                        {{ result.delta | round(3) }}
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </span>
+            </div>
+
             <div class="row"><span>Bid / Ask:</span><span>{{ result.bid }} / {{ result.ask }}</span></div>
             <div class="row"><span>Last Price:</span><span>{{ result.last }}</span></div>
         </div>
@@ -155,9 +152,15 @@
         calculateBtn.disabled = !expirationSelect.value;
     }
 
-    expirationSelect.addEventListener('change', updateButtonState);
+    // Auto-select first expiration if none selected
+    if (expirationSelect && expirationSelect.options.length > 0) {
+        const selected = "{{ request.form.get('expiration', '') }}";
+        if (!selected) {
+            expirationSelect.selectedIndex = 0;
+        }
+    }
 
-    // Run once on page load (important after Get Expirations)
+    expirationSelect.addEventListener('change', updateButtonState);
     updateButtonState();
 </script>
 
