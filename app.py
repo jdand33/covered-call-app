@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, render_template
 
 app = Flask(__name__)
 
@@ -15,83 +15,170 @@ def tradier_headers():
     }
 
 
-# ============================
-# GET EXPIRATIONS
-# ============================
-@app.route("/expirations", methods=["GET"])
-def get_expirations():
-    symbol = request.args.get("symbol", "").upper().strip()
-    if not symbol:
-        return jsonify({"error": "Missing symbol"}), 400
+# -----------------------------
+# Fetch stock price
+# -----------------------------
+def get_stock_price(symbol):
+    url = f"{TRADIER_BASE}/markets/quotes"
+    params = {"symbols": symbol}
 
+    r = requests.get(url, headers=tradier_headers(), params=params)
+    if r.status_code != 200:
+        return None
+
+    data = r.json()
+    quote = data.get("quotes", {}).get("quote", {})
+    return quote.get("last")
+
+
+# -----------------------------
+# Fetch expirations
+# -----------------------------
+def get_expirations(symbol):
     url = f"{TRADIER_BASE}/markets/options/expirations"
     params = {"symbol": symbol, "includeAllRoots": "true", "strikes": "false"}
 
     r = requests.get(url, headers=tradier_headers(), params=params)
     if r.status_code != 200:
-        return jsonify({"error": f"Tradier error {r.status_code}: {r.text}"}), 400
+        return []
 
     data = r.json()
-    expirations = data.get("expirations", {}).get("date", [])
-
-    return jsonify({"symbol": symbol, "expirations": expirations})
+    return data.get("expirations", {}).get("date", [])
 
 
-# ============================
-# GET OPTION CHAIN FOR ONE EXPIRATION
-# ============================
-@app.route("/chain", methods=["GET"])
-def get_chain():
-    symbol = request.args.get("symbol", "").upper().strip()
-    expiration = request.args.get("expiration", "").strip()
-
-    if not symbol:
-        return jsonify({"error": "Missing symbol"}), 400
-    if not expiration:
-        return jsonify({"error": "Missing expiration"}), 400
-
+# -----------------------------
+# Fetch chain for one expiration
+# -----------------------------
+def get_chain(symbol, expiration):
     url = f"{TRADIER_BASE}/markets/options/chains"
     params = {"symbol": symbol, "expiration": expiration}
 
     r = requests.get(url, headers=tradier_headers(), params=params)
     if r.status_code != 200:
-        return jsonify({"error": f"Tradier error {r.status_code}: {r.text}"}), 400
+        return []
 
     data = r.json()
-    options = data.get("options", {}).get("option", [])
+    return data.get("options", {}).get("option", [])
 
-    # Normalize output for your UI
-    cleaned = []
-    for opt in options:
-        cleaned.append({
-            "symbol": opt.get("symbol"),
-            "type": opt.get("option_type"),
-            "strike": opt.get("strike"),
-            "expiration": opt.get("expiration_date"),
-            "bid": opt.get("bid"),
-            "ask": opt.get("ask"),
-            "last": opt.get("last"),
-            "delta": opt.get("greeks", {}).get("delta"),
-            "gamma": opt.get("greeks", {}).get("gamma"),
-            "theta": opt.get("greeks", {}).get("theta"),
-            "vega": opt.get("greeks", {}).get("vega"),
-            "rho": opt.get("greeks", {}).get("rho"),
-            "iv": opt.get("greeks", {}).get("mid_iv"),
-            "volume": opt.get("volume"),
-            "open_interest": opt.get("open_interest"),
-        })
 
-    return jsonify({
-        "symbol": symbol,
-        "expiration": expiration,
-        "count": len(cleaned),
-        "options": cleaned
-    })
+# -----------------------------
+# Delta targets
+# -----------------------------
+DELTA_TARGETS = {
+    "very_safe": 0.10,
+    "safe": 0.15,
+    "moderate": 0.20,
+    "aggressive": 0.25,
+    "very_aggressive": 0.30,
+}
+
+
+# -----------------------------
+# Main route
+# -----------------------------
+@app.route("/", methods=["GET", "POST"])
+def index():
+    expirations = None
+    result = None
+    error = None
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        ticker = request.form.get("ticker", "").upper().strip()
+
+        if not ticker:
+            error = "Ticker required."
+            return render_template("index.html", error=error)
+
+        # -------------------------
+        # LOAD EXPIRATIONS
+        # -------------------------
+        if action == "load":
+            expirations = get_expirations(ticker)
+            if not expirations:
+                error = "Could not load expirations."
+            return render_template("index.html",
+                                   expirations=expirations,
+                                   error=error)
+
+        # -------------------------
+        # CALCULATE COVERED CALL
+        # -------------------------
+        if action == "calculate":
+            expiration = request.form.get("expiration")
+            risk = request.form.get("risk")
+
+            expirations = get_expirations(ticker)
+
+            if not expiration:
+                error = "Select an expiration."
+                return render_template("index.html",
+                                       expirations=expirations,
+                                       error=error)
+
+            stock_price = get_stock_price(ticker)
+            if not stock_price:
+                error = "Could not fetch stock price."
+                return render_template("index.html",
+                                       expirations=expirations,
+                                       error=error)
+
+            chain = get_chain(ticker, expiration)
+            if not chain:
+                error = "Could not load option chain."
+                return render_template("index.html",
+                                       expirations=expirations,
+                                       error=error)
+
+            # Filter calls only
+            calls = [c for c in chain if c.get("option_type") == "call"]
+
+            # Pick strike closest to delta target
+            target_delta = DELTA_TARGETS.get(risk, 0.20)
+
+            best = min(
+                calls,
+                key=lambda c: abs((c.get("greeks", {}) or {}).get("delta", 0) - target_delta)
+            )
+
+            strike = best.get("strike")
+            delta = best.get("greeks", {}).get("delta")
+            iv = best.get("greeks", {}).get("mid_iv")
+            premium = best.get("bid")
+            oi = best.get("open_interest")
+
+            # Assignment probability (approx)
+            assign_prob = round(abs(delta) * 100, 1)
+
+            # Days out
+            from datetime import datetime
+            d0 = datetime.now()
+            d1 = datetime.strptime(expiration, "%Y-%m-%d")
+            days_out = (d1 - d0).days
+
+            result = {
+                "ticker": ticker,
+                "stock_price": round(stock_price, 2),
+                "expiration": expiration,
+                "days_out": days_out,
+                "risk_label": risk.replace("_", " ").title(),
+                "strike": strike,
+                "iv": iv,
+                "iv_estimated": iv is None,
+                "assign_prob": assign_prob,
+                "premium": premium,
+            }
+
+            return render_template("index.html",
+                                   expirations=expirations,
+                                   result=result)
+
+    return render_template("index.html")
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "has_token": bool(TRADIER_TOKEN)})
+    return {"status": "ok", "has_token": bool(TRADIER_TOKEN)}
 
 
 if __name__ == "__main__":
