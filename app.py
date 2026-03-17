@@ -1,5 +1,7 @@
 import os
+import math
 import requests
+from datetime import datetime
 from flask import Flask, request, render_template
 
 app = Flask(__name__)
@@ -13,6 +15,36 @@ def tradier_headers():
         "Authorization": f"Bearer {TRADIER_TOKEN}",
         "Accept": "application/json"
     }
+
+
+# -----------------------------
+# Black-Scholes helpers
+# -----------------------------
+def norm_cdf(x):
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def black_scholes_call_delta(S, K, T, r, sigma):
+    if sigma <= 0 or T <= 0:
+        return None
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    return norm_cdf(d1)
+
+
+def estimate_iv_call(S, K, T, r, price):
+    sigma = 0.30  # initial guess
+    for _ in range(20):
+        if sigma <= 0:
+            sigma = 0.01
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        model_price = S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
+        vega = S * math.sqrt(T) * (1 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
+        diff = model_price - price
+        if abs(diff) < 1e-6:
+            break
+        sigma -= diff / max(vega, 1e-8)
+    return max(sigma, 0.0001)
 
 
 # -----------------------------
@@ -128,14 +160,52 @@ def index():
                                        expirations=expirations,
                                        error=error)
 
-            # Filter calls only
+            # -------------------------
+            # CALL FILTER + FALLBACK DELTA/IV
+            # -------------------------
             calls = [c for c in chain if c.get("option_type") == "call"]
 
-            # Remove calls with missing greeks or missing delta
-            calls = [
-                c for c in calls
-                if c.get("greeks") and c["greeks"].get("delta") is not None
-            ]
+            enhanced_calls = []
+            for c in calls:
+                strike = c.get("strike")
+                bid = c.get("bid") or 0
+                ask = c.get("ask") or 0
+                mid = (bid + ask) / 2 if (bid and ask) else None
+
+                # Time to expiration in years
+                exp_clean = expiration.split(":")[0]
+                d0 = datetime.now()
+                d1 = datetime.strptime(exp_clean, "%Y-%m-%d")
+                T = max((d1 - d0).days / 365.0, 0.0001)
+
+                r = 0.045  # risk-free rate
+
+                greeks = c.get("greeks") or {}
+                delta = greeks.get("delta")
+                iv = greeks.get("mid_iv")
+
+                # Fallback IV
+                if iv is None and mid:
+                    try:
+                        iv = estimate_iv_call(stock_price, strike, T, r, mid)
+                    except:
+                        iv = None
+
+                # Fallback delta
+                if delta is None and iv:
+                    try:
+                        delta = black_scholes_call_delta(stock_price, strike, T, r, iv)
+                    except:
+                        delta = None
+
+                if delta is None:
+                    continue
+
+                c["computed_delta"] = delta
+                c["computed_iv"] = iv
+                enhanced_calls.append(c)
+
+            calls = enhanced_calls
 
             if not calls:
                 error = "No valid call options found for this expiration."
@@ -143,24 +213,24 @@ def index():
                                        expirations=expirations,
                                        error=error)
 
-            # Pick strike closest to delta target
+            # -------------------------
+            # PICK BEST STRIKE
+            # -------------------------
             target_delta = DELTA_TARGETS.get(risk, 0.20)
 
             best = min(
                 calls,
-                key=lambda c: abs(c["greeks"]["delta"] - target_delta)
+                key=lambda c: abs(c.get("computed_delta") - target_delta)
             )
 
             strike = best.get("strike")
-            delta = best["greeks"]["delta"]
-            iv = best["greeks"].get("mid_iv")
+            delta = best.get("computed_delta")
+            iv = best.get("computed_iv")
             premium = best.get("bid")
 
-            # Assignment probability (approx)
             assign_prob = round(abs(delta) * 100, 1)
 
             # Days out
-            from datetime import datetime
             exp_clean = expiration.split(":")[0]
             d0 = datetime.now()
             d1 = datetime.strptime(exp_clean, "%Y-%m-%d")
