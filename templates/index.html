@@ -57,7 +57,7 @@
             background: #f4f4f4;
         }
 
-        /* 🌙 DARK MODE RESTORED */
+        /* 🌙 DARK MODE */
         @media (prefers-color-scheme: dark) {
             body {
                 background: #1c1c1e;
@@ -98,7 +98,11 @@
 <form method="POST">
 
     <label>Ticker:</label>
-    <input type="text" name="ticker" placeholder="AAPL" required>
+    <input type="text"
+           name="ticker"
+           placeholder="AAPL"
+           value="{{ request.form.ticker }}"
+           required>
 
     <button name="action" value="load">Load Expirations</button>
 
