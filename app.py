@@ -145,15 +145,18 @@ def index():
         expiration = request.form.get("expiration")
         risk = request.form.get("risk")
 
+        # Repopulate expirations so dropdown stays visible
+        expirations = [{"date": e, "earnings_week": False} for e in get_tradier_expirations(ticker)]
+
         if not expiration:
             error = "Select an expiration."
-            return render_template("index.html", error=error)
+            return render_template("index.html", expirations=expirations, error=error)
 
         # Stock price from Tradier
         price = get_stock_price_tradier(ticker)
         if price is None:
             error = "Unable to fetch stock price."
-            return render_template("index.html", error=error)
+            return render_template("index.html", expirations=expirations, error=error)
 
         # Days until expiration
         try:
@@ -161,7 +164,7 @@ def index():
             days_out = (d - datetime.now()).days
         except:
             error = "Invalid expiration date."
-            return render_template("index.html", error=error)
+            return render_template("index.html", expirations=expirations, error=error)
 
         # Target delta
         target_delta = RISK_TO_DELTA.get(risk, 0.20)
@@ -170,7 +173,7 @@ def index():
         chain = get_tradier_chain(ticker, expiration)
         if not chain:
             error = "Unable to pull option data."
-            return render_template("index.html", error=error)
+            return render_template("index.html", expirations=expirations, error=error)
 
         # Find strike closest to target delta
         best = None
@@ -191,7 +194,7 @@ def index():
 
         if not best:
             error = "No valid call options found."
-            return render_template("index.html", error=error)
+            return render_template("index.html", expirations=expirations, error=error)
 
         strike = best.get("strike")
         premium = safe_float(best.get("bid"))
